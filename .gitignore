@@ -168,5 +168,5 @@ extensions/.continue-debug/
 *.iml
 
 .continuerules
-**/.continue/assistants/
+.continue/*
 keys
