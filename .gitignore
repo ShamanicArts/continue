@@ -167,6 +167,9 @@ extensions/.continue-debug/
 # intellij module library files
 *.iml
 
+# local continue configurations
+
 .continuerules
 .continue/*
+
 keys
