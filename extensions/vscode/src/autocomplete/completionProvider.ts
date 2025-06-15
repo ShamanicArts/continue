@@ -1,4 +1,5 @@
 import { CompletionProvider } from "core/autocomplete/CompletionProvider";
+import { AutocompleteSessionManager } from "core/autocomplete/session/AutocompleteSessionManager";
 import { processSingleLineCompletion } from "core/autocomplete/util/processSingleLineCompletion";
 import {
   type AutocompleteInput,
@@ -24,12 +25,6 @@ import {
   setupStatusBar,
   stopStatusBarLoading,
 } from "./statusBar";
-
-interface VsCodeCompletionInput {
-  document: vscode.TextDocument;
-  position: vscode.Position;
-  context: vscode.InlineCompletionContext;
-}
 
 export class ContinueCompletionProvider
   implements vscode.InlineCompletionItemProvider
@@ -57,6 +52,7 @@ export class ContinueCompletionProvider
   private nextEditProvider: NextEditProvider | undefined;
   private recentlyVisitedRanges: RecentlyVisitedRangesService;
   private recentlyEditedTracker: RecentlyEditedTracker;
+  private readonly sessionManager: AutocompleteSessionManager;
 
   constructor(
     private readonly configHandler: ConfigHandler,
@@ -79,6 +75,11 @@ export class ContinueCompletionProvider
       this.onError.bind(this),
       getDefinitionsFromLsp,
     );
+    // Instantiate the session manager, giving it the core provider to use.
+    this.sessionManager = new AutocompleteSessionManager(
+      this.completionProvider,
+    );
+
     // NOTE: Only turn it on locally when testing (for review purposes).
     if (IS_NEXT_EDIT_ACTIVE) {
       this.nextEditProvider = new NextEditProvider(
@@ -189,10 +190,6 @@ export class ContinueCompletionProvider
       // Handle commit message input box
       let manuallyPassPrefix: string | undefined = undefined;
 
-      // handle manual autocompletion trigger
-      const wasManuallyTriggered =
-        context.triggerKind === vscode.InlineCompletionTriggerKind.Invoke;
-
       const input: AutocompleteInput = {
         pos,
         manuallyPassFileContents,
@@ -208,12 +205,41 @@ export class ContinueCompletionProvider
       };
 
       setupStatusBar(undefined, true);
-      const outcome =
-        await this.completionProvider.provideInlineCompletionItems(
+
+      const wasManuallyTriggered =
+        context.triggerKind === vscode.InlineCompletionTriggerKind.Invoke;
+
+      console.log(
+        `[VSC Provider] Trigger kind: ${wasManuallyTriggered ? "MANUAL" : "AUTOMATIC"}`,
+      );
+
+      let outcome: AutocompleteOutcome | undefined;
+      let outcomes: AutocompleteOutcome[] = [];
+
+      if (wasManuallyTriggered) {
+        console.log(
+          `[VSC Provider] calling sessionManager.getNextCompletion...`,
+        );
+
+        outcomes = await this.sessionManager.getNextCompletion(input, signal);
+
+        console.log(
+          `[VSC Provider] Received ${outcomes.length} outcomes from session manager.`,
+        );
+        if (outcomes.length > 0) {
+          outcome = outcomes[outcomes.length - 1];
+        }
+      } else {
+        this.sessionManager.clearSession();
+        outcome = await this.completionProvider.provideInlineCompletionItems(
           input,
           signal,
-          wasManuallyTriggered,
+          undefined,
         );
+        if (outcome) {
+          outcomes = [outcome];
+        }
+      }
 
       if (!outcome || !outcome.completion) {
         return null;
@@ -297,18 +323,18 @@ export class ContinueCompletionProvider
         range = new vscode.Range(startPos, document.lineAt(startPos).range.end);
       }
 
-      const completionItem = new vscode.InlineCompletionItem(
-        completionText,
-        range,
-        {
+      const completionItems = outcomes.map((o) => {
+        const item = new vscode.InlineCompletionItem(o.completion, range);
+        item.command = {
           title: "Log Autocomplete Outcome",
           command: "continue.logAutocompleteOutcome",
-          arguments: [input.completionId, this.completionProvider],
-        },
-      );
+          arguments: [o.completionId, this.completionProvider],
+        };
+        (item as any).completeBracketPairs = true;
+        return item;
+      });
 
-      (completionItem as any).completeBracketPairs = true;
-      return [completionItem];
+      return completionItems;
     } finally {
       stopStatusBarLoading();
     }

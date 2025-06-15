@@ -49,10 +49,12 @@ export function renderPrompt({
   snippetPayload,
   workspaceDirs,
   helper,
+  rejectedCompletionText,
 }: {
   snippetPayload: SnippetPayload;
   workspaceDirs: string[];
   helper: HelperVars;
+  rejectedCompletionText?: string;
 }): {
   prompt: string;
   prefix: string;
@@ -73,6 +75,21 @@ export function renderPrompt({
 
   const snippets = getSnippets(helper, snippetPayload);
 
+  let negativePrompt = "";
+  if (rejectedCompletionText) {
+    negativePrompt = `
+// The user has already seen and rejected the following completion.
+// Provide a different and better alternative.
+//
+// REJECTED COMPLETION:
+// """
+// ${rejectedCompletionText}
+// """
+//
+// DIFFERENT AND BETTER COMPLETION:
+`;
+  }
+
   // Some models have prompts that need two passes. This lets us pass the compiled prefix/suffix
   // into either the 2nd template to generate a raw string, or to pass prefix, suffix to a FIM endpoint
   if (compilePrefixSuffix) {
@@ -84,9 +101,10 @@ export function renderPrompt({
       snippets,
       helper.workspaceUris,
     );
+    prefix = prefix + negativePrompt;
   } else {
     const formattedSnippets = formatSnippets(helper, snippets, workspaceDirs);
-    prefix = [formattedSnippets, prefix].join("\n");
+    prefix = [formattedSnippets, prefix, negativePrompt].join("\n");
   }
 
   const prompt =

@@ -29,6 +29,26 @@ const ERRORS_TO_IGNORE = [
   "operation was aborted",
 ];
 
+// This type represents a simple forced trigger.
+type ForceTrigger = {
+  type: "force";
+};
+
+// This type represents a reroll, which includes the necessary data.
+type RerollTrigger = {
+  type: "reroll";
+  count: number;
+  rejectedCompletionText: string;
+};
+
+// This is the discriminated union. A manual trigger is one of these two types.
+export type ManualTriggerContext = ForceTrigger | RerollTrigger;
+
+interface RerollInfo {
+  count: number;
+  rejectedCompletionText: string;
+}
+
 export class CompletionProvider {
   private autocompleteCache = AutocompleteLruCache.get();
   public errorsShown: Set<string> = new Set();
@@ -127,10 +147,14 @@ export class CompletionProvider {
   public async provideInlineCompletionItems(
     input: AutocompleteInput,
     token: AbortSignal | undefined,
-    force?: boolean,
+    manualTriggerContext?: ManualTriggerContext,
   ): Promise<AutocompleteOutcome | undefined> {
     try {
       // Create abort signal if not given
+      console.log(
+        "[CoreProvider] received manual trigger context: ",
+        manualTriggerContext,
+      );
       if (!token) {
         const controller = this.loggingService.createAbortController(
           input.completionId,
@@ -147,7 +171,7 @@ export class CompletionProvider {
       const options = await this._getAutocompleteOptions(llm);
 
       // Debounce
-      if (!force) {
+      if (!manualTriggerContext) {
         if (
           await this.debouncer.delayAndShouldDebounce(options.debounceDelay)
         ) {
@@ -166,9 +190,14 @@ export class CompletionProvider {
         this.ide,
       );
 
+      console.log("[CoreProvider] Checking prefilter...");
+
       if (await shouldPrefilter(helper, this.ide)) {
+        console.error("[CoreProvider] PREFILTER FAILED. Request terminated.");
         return undefined;
       }
+
+      console.log("[CoreProvider] Prefilter passed.");
 
       const [snippetPayload, workspaceDirs] = await Promise.all([
         getAllSnippets({
@@ -180,12 +209,46 @@ export class CompletionProvider {
         this.ide.getWorkspaceDirs(),
       ]);
 
+      const isReroll = manualTriggerContext?.type === "reroll";
+      const rerollInfo = isReroll ? manualTriggerContext : undefined;
+
+      if (rerollInfo) {
+        console.log(
+          `[CoreProvider] this is a reroll. count: ${rerollInfo.count}, rejected completion: ${rerollInfo.rejectedCompletionText}`,
+        );
+      }
+
+      console.log("[CoreProvider] About to call renderPrompt.");
+
       const { prompt, prefix, suffix, completionOptions } = renderPrompt({
         snippetPayload,
         workspaceDirs,
         helper,
+        rejectedCompletionText: rerollInfo?.rejectedCompletionText,
       });
 
+      console.log("[CoreProvider] renderPrompt call succeeded.");
+
+      console.log("[CoreProvider] renderPrompt output:", {
+        promptLength: prompt.length,
+        prefix: prefix.slice(0, 100) + "...",
+        suffix: suffix.slice(0, 100) + "...",
+        completionOptions,
+      });
+
+      if (rerollInfo && completionOptions) {
+        completionOptions.temperature = Math.min(
+          0.7,
+          0.2 + (rerollInfo.count - 1) * 0.1,
+        );
+        console.log(
+          `[CoreProvider] Reroll detected. Adjusted temperature to ${completionOptions.temperature}`,
+        );
+      }
+
+      console.log("[CoreProvider] Final prompt tail:", prompt.slice(-500));
+
+      const useCache = helper.options.useCache && !isReroll;
       // Completion
       let completion: string | undefined = "";
 
@@ -201,6 +264,8 @@ export class CompletionProvider {
       } else {
         const multiline =
           !helper.options.transform || shouldCompleteMultiline(helper);
+
+        console.log("[CoreProvider] Calling streamer with prompt:", prompt);
 
         const completionStream =
           this.completionStreamer.streamCompletionWithFilters(
@@ -275,6 +340,11 @@ export class CompletionProvider {
 
       return outcome;
     } catch (e: any) {
+      console.error(
+        "[CoreProvider] Error in provideInlineCompletionItems:",
+        e,
+        e.stack,
+      );
       this.onError(e);
     } finally {
       this.loggingService.deleteAbortController(input.completionId);
